@@ -283,7 +283,7 @@ STUDENT'S QUESTION: {query}
 
 {answer_trigger}"""
 
-    # 1. Check if Local Ollama is running on PC (2s ping), then allow 120s for CPU generation
+    # 1. Local PC Mode: Check if Local Ollama is running
     try:
         base_ollama = OLLAMA_URL.replace("/api/generate", "")
         requests.get(base_ollama, timeout=2)
@@ -298,38 +298,80 @@ STUDENT'S QUESTION: {query}
         response.raise_for_status()
         return response.json().get("response", "No response generated.")
     except Exception:
-        # 2. Safe Fallback for Live Website (Streamlit Cloud + Free Groq API)
-        api_key = os.getenv("GROQ_API_KEY", "")
-        if not api_key:
-            try:
-                api_key = st.secrets["GROQ_API_KEY"]
-            except Exception:
-                api_key = ""
+        pass
 
-        if api_key:
-            headers = {
-                "Authorization": f"Bearer {api_key}",
-                "Content-Type": "application/json"
-            }
-            cloud_payload = {
-                "model": "llama-3.1-8b-instant",
+    # 2. Live Website Mode: Auto-detect active Groq models so 404 never happens
+    api_key = os.getenv("GROQ_API_KEY", "")
+    if not api_key:
+        try:
+            api_key = st.secrets["GROQ_API_KEY"]
+        except Exception:
+            api_key = ""
+
+    api_key = str(api_key).strip().strip('"').strip("'")
+    if api_key:
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json"
+        }
+        candidate_models = [
+            "llama-3.3-70b-versatile",
+            "llama-3.1-8b-instant",
+            "gemma2-9b-it",
+            "llama3-8b-8192"
+        ]
+        try:
+            m_resp = requests.get("https://api.groq.com/openai/v1/models", headers=headers, timeout=10)
+            if m_resp.status_code == 200:
+                for m in m_resp.json().get("data", []):
+                    m_id = m.get("id", "")
+                    if m_id and not any(x in m_id.lower() for x in ["whisper", "guard", "tts", "embed", "vision"]):
+                        if m_id not in candidate_models:
+                            candidate_models.append(m_id)
+        except Exception:
+            pass
+
+        for model_id in candidate_models:
+            try:
+                cloud_payload = {
+                    "model": model_id,
+                    "messages": [{"role": "user", "content": prompt}],
+                    "temperature": 0.25
+                }
+                r = requests.post(
+                    "https://api.groq.com/openai/v1/chat/completions",
+                    headers=headers,
+                    json=cloud_payload,
+                    timeout=25
+                )
+                if r.status_code == 200:
+                    return r.json()["choices"][0]["message"]["content"]
+            except Exception:
+                continue
+
+    # 3. Zero-Key Free AI Fallback (Works even without API Key)
+    try:
+        free_resp = requests.post(
+            "https://text.pollinations.ai/openai",
+            headers={"Content-Type": "application/json"},
+            json={
+                "model": "openai",
                 "messages": [{"role": "user", "content": prompt}],
                 "temperature": 0.25
-            }
-            r = requests.post(
-                "https://api.groq.com/openai/v1/chat/completions",
-                headers=headers,
-                json=cloud_payload,
-                timeout=30
-            )
-            r.raise_for_status()
-            return r.json()["choices"][0]["message"]["content"]
-        else:
-            return (
-                "**[Retrieved Direct Match from Encrypted Vault]:**\n\n"
-                + "\n\n".join([f"📄 **{c['source']} (Page {c['page']})**: {c['text']}" for c in context_chunks])
-            )
+            },
+            timeout=30
+        )
+        if free_resp.status_code == 200:
+            data = free_resp.json()
+            if "choices" in data and data["choices"]:
+                return data["choices"][0]["message"]["content"]
+    except Exception:
+        pass
 
+    return (
+        "**[Direct Match from Encrypted Vault]:**\n\n"
+        + "\n\n".join([f"📄 **{c['source']} (Page {c['page']})**: {c['text']}" for c in context_chunks])
+    )
 # -------------------- TOP HERO BANNER --------------------
 st.markdown("""
 <div class="main-banner">
